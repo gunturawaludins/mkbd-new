@@ -1,15 +1,20 @@
-// Excel Extractor - Handles different extraction methods for various sheet types
+// Excel Extractor - FORCE UPDATE FIX
 import * as XLSX from 'xlsx';
 import { SheetData, ProcessedSheet, ETLResult } from './types';
 import { sanitizeColumnNames, sanitizeTableName } from './sanitizer';
 import { cleanData, findDataStartRow } from './cleaner';
 import { processEnrichmentPipeline } from './enrichment';
 import { isMasterLoaded } from './masterData';
-// Sheet patterns that need special handling
-const VD510_SHEET_PATTERN = /vd510|vd5[\-_]?10|formulir\s*10/i;
-const STANDARD_SHEET_PATTERN = /vd5\d{1,2}|formulir\s*\d+/i;
+import {
+  extractVD59TotalFromData,
+  calculateVD510NilaiRanking,
+  resetCalculationState,
+  updateVD59WithCalculatedData
+} from './nilaiRankingCalculator';
 
-// Table markers for VD510 special extraction
+const VD510_SHEET_PATTERN = /vd510|vd5[\-_]?10|formulir\s*10/i;
+const VD59_SHEET_PATTERN = /vd59|vd5[\-_]?9|formulir\s*9/i;
+
 const TABLE_10C_START = 'TABEL 10C';
 const TABLE_10C_STOP_MARKERS = ['TABEL 10D', 'TABEL 10E', 'Apabila diperlukan'];
 
@@ -22,174 +27,176 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
   };
 
   try {
+    resetCalculationState();
+
     const arrayBuffer = await file.arrayBuffer();
     const workbook = XLSX.read(arrayBuffer, { type: 'array' });
 
+    const allSheets: ProcessedSheet[] = [];
+    let totalAsetLancar: number = 0;
+    let vd59Found = false;
+
+    console.log('🚀 Starting Extraction Process...');
+
+    // --- PASS 1: EXTRACT DATA & FIND ASET LANCAR ---
     for (const sheetName of workbook.SheetNames) {
       try {
         const worksheet = workbook.Sheets[sheetName];
-        
         let sheetData: SheetData;
         
-        // Determine extraction method based on sheet name
         if (VD510_SHEET_PATTERN.test(sheetName)) {
           sheetData = extractVD510Special(worksheet, sheetName);
-          result.warnings.push(`Sheet "${sheetName}" diproses dengan metode khusus (Tabel 10C)`);
         } else {
           sheetData = extractStandard(worksheet, sheetName);
         }
 
-        if (sheetData.rows.length === 0) {
-          result.warnings.push(`Sheet "${sheetName}" tidak memiliki data setelah pembersihan`);
-          continue;
+        if (sheetData.rows.length === 0) continue;
+
+        let processedSheet = processSheetData(sheetData, file.name);
+
+        // Cek VD59 untuk ambil Aset Lancar
+        if (VD59_SHEET_PATTERN.test(sheetName)) {
+          console.log(`📊 Detected VD59: "${sheetName}".`);
+          const extractedVal = extractVD59TotalFromData(processedSheet.data, processedSheet.headers);
+          if (extractedVal > 0) {
+            totalAsetLancar = extractedVal;
+            vd59Found = true;
+          }
         }
 
-        // Process and clean the data
-        const processedSheet = processSheetData(sheetData, file.name);
-        result.sheets.push(processedSheet);
-        
+        allSheets.push(processedSheet);
       } catch (sheetError) {
-        result.warnings.push(`Gagal memproses sheet "${sheetName}": ${sheetError}`);
+        result.warnings.push(`Gagal sheet "${sheetName}": ${sheetError}`);
       }
     }
 
+    // --- PASS 2: CALCULATE VD510 ---
+    console.log(`📊 Pass 2: Calc VD510 with Aset = ${totalAsetLancar}`);
+    
+    let grandTotalRankingLiabilities = 0; 
+
+    for (let i = 0; i < allSheets.length; i++) {
+      const sheet = allSheets[i];
+      // Cek sheet VD510
+      if (VD510_SHEET_PATTERN.test(sheet.tableName) || sheet.tableName.includes('TABEL_10C')) {
+        
+        const calculatedData = calculateVD510NilaiRanking(
+          sheet.data,
+          sheet.headers,
+          totalAsetLancar 
+        );
+
+        // Ambil Total Portofolio
+        const totalRow = calculatedData.find(row => {
+            const s = Object.values(row).map(v => String(v).toLowerCase()).join(' ');
+            return s.includes('total portofolio milik') || s.includes('total portofolio');
+        });
+
+        if (totalRow) {
+            const rankingKey = Object.keys(totalRow).find(k => 
+                k.toLowerCase().includes('ranking') || k.toLowerCase().includes('liabilities')
+            );
+            if (rankingKey) grandTotalRankingLiabilities = Number(totalRow[rankingKey]) || 0;
+        }
+
+        allSheets[i] = { ...sheet, data: calculatedData };
+        result.warnings.push(`VD510 Calc Done. Result: ${grandTotalRankingLiabilities.toLocaleString()}`);
+      }
+    }
+
+    // --- PASS 3: FORCE UPDATE VD59 (INI YANG PENTING) ---
+    // HAPUS syarat "if > 0". Kita jalankan update PAKSA.
+    console.log("🔄 Pass 3: FORCING VD59 UPDATE...");
+    
+    let vd59UpdatedCount = 0;
+    for (let i = 0; i < allSheets.length; i++) {
+        const sheet = allSheets[i];
+        
+        // Cek jika ini sheet VD59
+        if (VD59_SHEET_PATTERN.test(sheet.tableName)) {
+            console.log(`⚡ UPDATING SHEET: ${sheet.sheetName}`);
+            
+            const updatedVD59 = updateVD59WithCalculatedData(
+                sheet.data,
+                sheet.headers,
+                grandTotalRankingLiabilities
+            );
+
+            allSheets[i] = { ...sheet, data: updatedVD59 };
+            vd59UpdatedCount++;
+            result.warnings.push(`✅ VD59 "${sheet.sheetName}" berhasil di-update paksa.`);
+        }
+    }
+
+    if (vd59UpdatedCount === 0) {
+        console.error("❌ ERROR: Tidak ada sheet VD59 yang ditemukan untuk di-update!");
+        result.warnings.push("⚠️ Gagal Update: Sheet VD59 tidak ditemukan di Pass 3.");
+    }
+
+    result.sheets = allSheets;
+
     if (result.sheets.length === 0) {
       result.success = false;
-      result.errors.push('Tidak ada sheet yang berhasil diproses');
+      result.errors.push('No sheets processed');
     }
 
   } catch (error) {
     result.success = false;
-    result.errors.push(`Gagal membaca file Excel: ${error}`);
+    result.errors.push(`Extraction Failed: ${error}`);
   }
 
   return result;
 }
 
+// --- BAGIAN HELPER DI BAWAH JANGAN DIUBAH ---
 function extractStandard(worksheet: XLSX.WorkSheet, sheetName: string): SheetData {
-  // Convert to JSON with all options
-  const rawData = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
-    header: 1,
-    defval: null,
-    blankrows: true,
-  });
-
-  if (rawData.length === 0) {
-    return { sheetName, headers: [], rows: [], originalHeaders: [], rowCount: 0 };
-  }
-
-  // Find where data actually starts (skip letterhead)
+  const rawData = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: null, blankrows: true });
+  if (rawData.length === 0) return { sheetName, headers: [], rows: [], originalHeaders: [], rowCount: 0 };
   const dataStartRow = findDataStartRow(rawData);
-  
-  // The header row is typically at dataStartRow, data starts at dataStartRow + 1
   const headerRowIndex = Math.min(dataStartRow, rawData.length - 1);
   const headerRow = rawData[headerRowIndex] as (string | number | null)[];
-  
-  // Sanitize headers
-  const { sanitizedHeaders, warnings } = sanitizeColumnNames(headerRow);
-  
-  // Extract data rows
+  const { sanitizedHeaders } = sanitizeColumnNames(headerRow);
   const dataRows = rawData.slice(headerRowIndex + 1);
-  
-  // Convert to objects
   const rows = dataRows.map((row) => {
     const rowArray = row as unknown[];
     const obj: Record<string, unknown> = {};
-    sanitizedHeaders.forEach((header, idx) => {
-      obj[header] = rowArray[idx] ?? null;
-    });
+    sanitizedHeaders.forEach((header, idx) => { obj[header] = rowArray[idx] ?? null; });
     return obj;
   });
-
-  return {
-    sheetName,
-    headers: sanitizedHeaders,
-    originalHeaders: headerRow.map(h => String(h ?? '')),
-    rows,
-    rowCount: rows.length,
-  };
+  return { sheetName, headers: sanitizedHeaders, originalHeaders: headerRow.map(h => String(h ?? '')), rows, rowCount: rows.length };
 }
 
 function extractVD510Special(worksheet: XLSX.WorkSheet, sheetName: string): SheetData {
-  // Convert entire sheet to array
-  const rawData = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
-    header: 1,
-    defval: null,
-    blankrows: true,
-  });
-
-  // Find TABEL 10C start
-  let table10CStart = -1;
-  let table10CEnd = rawData.length;
-
+  const rawData = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, defval: null, blankrows: true });
+  let table10CStart = -1; let table10CEnd = rawData.length;
   for (let i = 0; i < rawData.length; i++) {
-    const rowText = (rawData[i] as unknown[])
-      .filter(c => c !== null && c !== undefined)
-      .map(c => String(c))
-      .join(' ');
-
-    // Find start marker
-    if (table10CStart === -1 && rowText.toUpperCase().includes(TABLE_10C_START)) {
-      table10CStart = i;
-      continue;
-    }
-
-    // Find end marker (after we found start)
+    const rowText = (rawData[i] as unknown[]).filter(c => c !== null && c !== undefined).map(c => String(c)).join(' ');
+    if (table10CStart === -1 && rowText.toUpperCase().includes(TABLE_10C_START)) { table10CStart = i; continue; }
     if (table10CStart !== -1) {
       for (const stopMarker of TABLE_10C_STOP_MARKERS) {
-        if (rowText.toUpperCase().includes(stopMarker.toUpperCase())) {
-          table10CEnd = i;
-          break;
-        }
+        if (rowText.toUpperCase().includes(stopMarker.toUpperCase())) { table10CEnd = i; break; }
       }
       if (table10CEnd !== rawData.length) break;
     }
   }
-
-  if (table10CStart === -1) {
-    // Fallback to standard extraction if TABEL 10C not found
-    return extractStandard(worksheet, sheetName);
-  }
-
-  // Extract only TABEL 10C data
-  // Header is typically the row after the title
+  if (table10CStart === -1) return extractStandard(worksheet, sheetName);
   const headerRowIndex = table10CStart + 1;
   const headerRow = rawData[headerRowIndex] as (string | number | null)[];
-  
-  // Sanitize headers
   const { sanitizedHeaders } = sanitizeColumnNames(headerRow);
-  
-  // Extract data rows (from after header to before end marker)
   const dataRows = rawData.slice(headerRowIndex + 1, table10CEnd);
-  
-  // Convert to objects
   const rows = dataRows.map((row) => {
     const rowArray = row as unknown[];
     const obj: Record<string, unknown> = {};
-    sanitizedHeaders.forEach((header, idx) => {
-      obj[header] = rowArray[idx] ?? null;
-    });
+    sanitizedHeaders.forEach((header, idx) => { obj[header] = rowArray[idx] ?? null; });
     return obj;
   });
-
-  return {
-    sheetName: `${sheetName}_TABEL_10C`,
-    headers: sanitizedHeaders,
-    originalHeaders: headerRow.map(h => String(h ?? '')),
-    rows,
-    rowCount: rows.length,
-  };
+  return { sheetName: `${sheetName}_TABEL_10C`, headers: sanitizedHeaders, originalHeaders: headerRow.map(h => String(h ?? '')), rows, rowCount: rows.length };
 }
 
 function processSheetData(sheetData: SheetData, fileName: string): ProcessedSheet {
-  // Clean the data
   const { cleanedData, removedColumns } = cleanData(sheetData.rows, sheetData.headers);
-  
-  // Filter out removed columns from headers
   let finalHeaders = sheetData.headers.filter(h => !removedColumns.includes(h));
   let processedData = cleanedData;
-  
-  // Apply enrichment if master data is loaded
   let enrichmentStats = null;
   if (isMasterLoaded()) {
     const enrichmentResult = processEnrichmentPipeline(cleanedData, finalHeaders);
@@ -197,28 +204,16 @@ function processSheetData(sheetData: SheetData, fileName: string): ProcessedShee
     finalHeaders = enrichmentResult.newHeaders;
     enrichmentStats = enrichmentResult.stats;
   }
-
-  // Add metadata columns
+  if (VD510_SHEET_PATTERN.test(sheetData.sheetName)) {
+    const nilaiRankingColumn = finalHeaders.find(h => {
+      const lower = h.toLowerCase();
+      return (lower.includes('nilai') || lower.includes('ranking')) && (lower.includes('rangking') || lower.includes('ranking') || lower.includes('liabilities'));
+    });
+    if (nilaiRankingColumn) { processedData = processedData.map(row => ({ ...row, [nilaiRankingColumn]: null })); }
+  }
   const uploadDate = new Date().toISOString();
-  const dataWithMetadata = processedData.map((row) => ({
-    ...row,
-    _fileName: fileName,
-    _uploadDate: uploadDate,
-  }));
-
-  return {
-    sheetName: sheetData.sheetName,
-    tableName: sanitizeTableName(sheetData.sheetName),
-    headers: [...finalHeaders, '_fileName', '_uploadDate'],
-    data: dataWithMetadata,
-    metadata: {
-      fileName,
-      uploadDate,
-      originalRowCount: sheetData.rowCount,
-      cleanedRowCount: cleanedData.length,
-      enrichmentStats,
-    },
-  };
+  const dataWithMetadata = processedData.map((row) => ({ ...row, fileName: fileName, uploadDate: uploadDate }));
+  return { sheetName: sheetData.sheetName, tableName: sanitizeTableName(sheetData.sheetName), headers: [...finalHeaders, 'fileName', 'uploadDate'], data: dataWithMetadata, metadata: { fileName, uploadDate, originalRowCount: sheetData.rowCount, cleanedRowCount: cleanedData.length, enrichmentStats } };
 }
 
 export function getSheetNames(file: File): Promise<string[]> {
@@ -229,9 +224,7 @@ export function getSheetNames(file: File): Promise<string[]> {
         const data = new Uint8Array(e.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         resolve(workbook.SheetNames);
-      } catch (error) {
-        reject(error);
-      }
+      } catch (error) { reject(error); }
     };
     reader.onerror = reject;
     reader.readAsArrayBuffer(file);

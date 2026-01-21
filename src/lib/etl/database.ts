@@ -44,7 +44,7 @@ export async function createTableIfNotExists(tableName: string, headers: string[
     dbInstance = await openDB(DB_NAME, currentVersion + 1, {
       upgrade(database) {
         if (!database.objectStoreNames.contains(tableName)) {
-          database.createObjectStore(tableName, { keyPath: '_id', autoIncrement: true });
+          database.createObjectStore(tableName, { keyPath: 'id', autoIncrement: true });
         }
         if (!database.objectStoreNames.contains(META_STORE)) {
           database.createObjectStore(META_STORE, { keyPath: 'tableName' });
@@ -81,10 +81,23 @@ export async function appendRecords(tableName: string, records: DatabaseRecord[]
   const store = tx.objectStore(tableName);
   
   let addedCount = 0;
+  const addedRecords: DatabaseRecord[] = [];
+  
   for (const record of records) {
-    const { _id, ...recordWithoutId } = record;
-    await store.add(recordWithoutId);
-    addedCount++;
+    try {
+      // Use put instead of add to preserve control
+      // This adds the record and lets autoIncrement handle ID if not provided
+      const key = await store.put(record);
+      
+      // Store the record with the actual key for later reference
+      addedRecords.push({
+        ...record,
+        id: typeof key === 'number' ? key : addedCount + 1
+      });
+      addedCount++;
+    } catch (error) {
+      console.error(`Error adding record:`, error);
+    }
   }
   
   await tx.done;
@@ -97,6 +110,8 @@ export async function appendRecords(tableName: string, records: DatabaseRecord[]
     meta.lastUpdated = new Date().toISOString();
     await db.put(META_STORE, meta);
   }
+
+  console.log(`Appended ${addedCount} records to ${tableName}`);
 
   return addedCount;
 }
@@ -115,10 +130,20 @@ export async function getTableData(tableName: string): Promise<DatabaseRecord[]>
   const db = await getDatabase();
   
   if (!db.objectStoreNames.contains(tableName)) {
+    console.warn(`Table ${tableName} does not exist`);
     return [];
   }
   
-  return await db.getAll(tableName);
+  const records = await db.getAll(tableName);
+  console.log(`getTableData(${tableName}): Retrieved ${records.length} records`);
+  
+  // Log first record to verify ID structure
+  if (records.length > 0) {
+    console.log(`First record keys:`, Object.keys(records[0]));
+    console.log(`First record:`, records[0]);
+  }
+  
+  return records;
 }
 
 export async function clearTable(tableName: string): Promise<void> {
@@ -155,4 +180,97 @@ export async function getTableStats(): Promise<{ totalTables: number; totalRecor
   const tables = await getAllTables();
   const totalRecords = tables.reduce((sum, t) => sum + t.recordCount, 0);
   return { totalTables: tables.length, totalRecords };
+}
+
+/**
+ * Update a single record in a table
+ */
+export async function updateRecord(
+  tableName: string,
+  recordId: number,
+  updates: Record<string, unknown>
+): Promise<void> {
+  const db = await getDatabase();
+  
+  if (!db.objectStoreNames.contains(tableName)) {
+    throw new Error(`Table ${tableName} does not exist`);
+  }
+  
+  const tx = db.transaction(tableName, 'readwrite');
+  const store = tx.objectStore(tableName);
+  
+  // Get existing record
+  const existingRecord = await store.get(recordId);
+  
+  if (!existingRecord) {
+    throw new Error(`Record with id ${recordId} not found`);
+  }
+  
+  // Merge updates with existing record
+  const updatedRecord = {
+    ...existingRecord,
+    ...updates,
+    id: recordId, // Ensure id is preserved
+  };
+  
+  // Update the record
+  await store.put(updatedRecord);
+  await tx.done;
+}
+
+/**
+ * Update multiple records with calculated values
+ */
+export async function updateRecordsWithCalculations(
+  tableName: string,
+  updates: Array<{ id: number; values: Record<string, unknown> }>
+): Promise<number> {
+  const db = await getDatabase();
+  
+  if (!db.objectStoreNames.contains(tableName)) {
+    throw new Error(`Table ${tableName} does not exist`);
+  }
+  
+  const tx = db.transaction(tableName, 'readwrite');
+  const store = tx.objectStore(tableName);
+  
+  let updateCount = 0;
+  
+  console.log(`Starting updateRecordsWithCalculations for table: ${tableName}, updates count: ${updates.length}`);
+  
+  for (const { id, values } of updates) {
+    try {
+      const existingRecord = await store.get(id);
+      
+      if (existingRecord) {
+        const updatedRecord = {
+          ...existingRecord,
+          ...values,
+          id, // Preserve id
+        };
+        
+        console.log(`Updating record ${id} with values:`, values);
+        
+        await store.put(updatedRecord);
+        updateCount++;
+      } else {
+        console.warn(`Record ${id} not found in ${tableName}`);
+      }
+    } catch (error) {
+      console.error(`Failed to update record ${id}:`, error);
+    }
+  }
+  
+  await tx.done;
+  
+  console.log(`Completed updateRecordsWithCalculations: ${updateCount} records updated`);
+  
+  // Update meta record count
+  const meta = await db.get(META_STORE, tableName) as TableMeta;
+  if (meta) {
+    meta.lastUpdated = new Date().toISOString();
+    await db.put(META_STORE, meta);
+  }
+  
+  return updateCount;
 }

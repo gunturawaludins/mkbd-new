@@ -14,15 +14,19 @@ import {
   Loader2,
   Info,
   Users,
-  TrendingUp
+  TrendingUp,
+  Zap
 } from 'lucide-react';
 import { FileUpload } from './FileUpload';
 import { DataPreview } from './DataPreview';
 import { DatabaseMonitor } from './DatabaseMonitor';
 import { MasterDataUpload } from './MasterDataUpload';
+import { FormulaEditor } from './FormulaEditor';
 import { extractFromExcel, ProcessedSheet, ETLResult } from '@/lib/etl';
 import { createTableIfNotExists, appendRecords } from '@/lib/etl/database';
 import { DatabaseRecord } from '@/lib/etl/types';
+import { createTestVD59VD510File, logExpectedCalculations } from '@/lib/etl/testDataGenerator';
+import { evaluateFormulaForRows, testFormula } from '@/lib/etl/formulaEvaluator';
 import { toast } from 'sonner';
 
 export function ETLDashboard() {
@@ -33,6 +37,7 @@ export function ETLDashboard() {
   const [selectedSheetIndex, setSelectedSheetIndex] = useState(0);
   const [fileName, setFileName] = useState<string>('');
   const [masterDataVersion, setMasterDataVersion] = useState(0);
+  const [showFormulaEditor, setShowFormulaEditor] = useState(false);
 
   const handleFileSelect = async (file: File) => {
     setIsProcessing(true);
@@ -57,6 +62,58 @@ export function ETLDashboard() {
     }
   };
 
+  const handleLoadTestData = async () => {
+    console.log('Loading test data for VD59 and VD510...');
+    logExpectedCalculations();
+    
+    const testBlob = createTestVD59VD510File();
+    const testFile = new File([testBlob], 'test-vd59-vd510.xlsx', { type: testBlob.type });
+    
+    await handleFileSelect(testFile);
+  };
+
+  const handleFormulaApply = (formula: string, targetColumn: string) => {
+    if (!etlResult?.sheets[selectedSheetIndex]) return;
+
+    const sheet = etlResult.sheets[selectedSheetIndex];
+    
+    // Test formula dengan sample data
+    const testSample = sheet.data[0] || {};
+    const testResult = testFormula(formula, testSample);
+
+    if (!testResult.success) {
+      toast.error(`Error pada formula: ${testResult.error}`);
+      return;
+    }
+
+    // Evaluate formula untuk semua rows
+    const result = evaluateFormulaForRows(formula, sheet.data, targetColumn);
+
+    if (result.errorCount > 0) {
+      console.warn(`Formula applied dengan ${result.errorCount} error:`);
+      result.errors.slice(0, 5).forEach(e => {
+        console.warn(`  Row ${e.rowIndex}: ${e.error}`);
+      });
+    }
+
+    // Update the sheet with calculated data
+    const updatedSheets = [...etlResult.sheets];
+    updatedSheets[selectedSheetIndex] = {
+      ...sheet,
+      data: result.updatedRows,
+    };
+
+    setEtlResult({
+      ...etlResult,
+      sheets: updatedSheets,
+    });
+
+    toast.success(
+      `Formula berhasil diterapkan! ${result.successCount} row berhasil, ${result.errorCount} error`
+    );
+    setShowFormulaEditor(false);
+  };
+
   const handleSaveToDatabase = async () => {
     if (!etlResult?.sheets.length) return;
 
@@ -65,6 +122,7 @@ export function ETLDashboard() {
     let totalRecords = 0;
 
     try {
+      // Step 1: Save all data to database
       for (const sheet of etlResult.sheets) {
         // Create table if not exists
         await createTableIfNotExists(sheet.tableName, sheet.headers);
@@ -75,6 +133,8 @@ export function ETLDashboard() {
         totalRecords += count;
       }
 
+      console.log(`✅ Saved ${totalRecords} records to ${savedCount} tables`);
+      console.log('Note: Nilai Rangking Liabilities calculated during extraction');
       toast.success(
         `Berhasil menyimpan ${totalRecords.toLocaleString()} record ke ${savedCount} tabel`
       );
@@ -140,23 +200,39 @@ export function ETLDashboard() {
               onMasterDataLoaded={() => setMasterDataVersion(v => v + 1)} 
             />
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Upload className="w-5 h-5" />
-                  Upload File Laporan MKBD
-                </CardTitle>
-                <CardDescription>
-                  Unggah file Excel laporan MKBD. Sistem akan otomatis:
-                  <ul className="list-disc list-inside mt-2 space-y-1">
-                    <li>Memindai semua sheet dan membersihkan data</li>
-                    <li>Mencocokkan Kode Efek dengan Master Data (VLOOKUP)</li>
-                    <li>Menghitung GRUP NILAI PASAR WAJAR (Agregasi)</li>
-                  </ul>
-                </CardDescription>
+            <Card className="border-primary/20 bg-gradient-to-br from-background via-background to-primary/5">
+              <CardHeader className="pb-3">
+                <div className="flex items-center gap-3">
+                  <div className="bg-primary/10 p-2 rounded-lg">
+                    <Upload className="w-5 h-5 text-primary" />
+                  </div>
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      Upload File Laporan MKBD
+                    </CardTitle>
+                    <CardDescription className="mt-2">
+                      Unggah file Excel laporan MKBD. Sistem akan otomatis:
+                      <ul className="list-disc list-inside mt-2 space-y-1">
+                        <li>Memindai semua sheet dan membersihkan data</li>
+                        <li>Mencocokkan Kode Efek dengan Master Data (VLOOKUP)</li>
+                        <li>Menghitung GRUP NILAI PASAR WAJAR (Agregasi)</li>
+                      </ul>
+                    </CardDescription>
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <FileUpload onFileSelect={handleFileSelect} isLoading={isProcessing} />
+                <div className="mt-4 flex gap-2 justify-center">
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={handleLoadTestData}
+                    disabled={isProcessing}
+                  >
+                    Load Test Data (VD59+VD510)
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 
@@ -202,83 +278,107 @@ export function ETLDashboard() {
 
                 {/* Enrichment Stats */}
                 {currentSheet?.metadata.enrichmentStats && (
-                  <Alert>
-                    <TrendingUp className="w-4 h-4" />
-                    <AlertTitle>Statistik Enrichment & Agregasi</AlertTitle>
-                    <AlertDescription>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
-                        <div className="text-center p-2 bg-muted rounded">
-                          <div className="text-lg font-bold text-primary">
+                  <Card className="border-blue-200 bg-gradient-to-br from-blue-50 to-blue-50/50">
+                    <CardHeader className="pb-3 border-b border-blue-200">
+                      <div className="flex items-center gap-2">
+                        <TrendingUp className="w-4 h-4 text-blue-600" />
+                        <CardTitle className="text-base text-blue-900">Statistik Enrichment & Agregasi</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="pt-4">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="p-3 bg-white rounded-lg border-2 border-emerald-200 shadow-sm">
+                          <div className="text-xs text-muted-foreground font-semibold mb-1 uppercase">Matched</div>
+                          <div className="text-2xl font-bold text-emerald-700">
                             {currentSheet.metadata.enrichmentStats.matchedCount}
                           </div>
-                          <div className="text-xs text-muted-foreground">Matched</div>
                         </div>
-                        <div className="text-center p-2 bg-muted rounded">
-                          <div className="text-lg font-bold text-orange-500">
+                        <div className="p-3 bg-white rounded-lg border-2 border-orange-200 shadow-sm">
+                          <div className="text-xs text-muted-foreground font-semibold mb-1 uppercase">Non-Grup</div>
+                          <div className="text-2xl font-bold text-orange-600">
                             {currentSheet.metadata.enrichmentStats.unmatchedCount}
                           </div>
-                          <div className="text-xs text-muted-foreground">Non-Grup</div>
                         </div>
-                        <div className="text-center p-2 bg-muted rounded">
-                          <div className="text-lg font-bold text-blue-500">
+                        <div className="p-3 bg-white rounded-lg border-2 border-blue-200 shadow-sm">
+                          <div className="text-xs text-muted-foreground font-semibold mb-1 uppercase">Grup Unik</div>
+                          <div className="text-2xl font-bold text-blue-700">
                             {currentSheet.metadata.enrichmentStats.groupCount}
                           </div>
-                          <div className="text-xs text-muted-foreground">Grup Unik</div>
                         </div>
-                        <div className="text-center p-2 bg-muted rounded">
-                          <div className="text-lg font-bold text-green-500">
+                        <div className="p-3 bg-white rounded-lg border-2 border-purple-200 shadow-sm">
+                          <div className="text-xs text-muted-foreground font-semibold mb-1 uppercase">Total Nilai</div>
+                          <div className="text-2xl font-bold text-purple-700">
                             {(currentSheet.metadata.enrichmentStats.totalGroupValue / 1e9).toFixed(2)}B
                           </div>
-                          <div className="text-xs text-muted-foreground">Total Nilai</div>
                         </div>
                       </div>
                       {currentSheet.metadata.enrichmentStats.kodeEfekColumn && (
-                        <p className="text-xs text-muted-foreground mt-2">
-                          Kolom Kode: <Badge variant="outline">{currentSheet.metadata.enrichmentStats.kodeEfekColumn}</Badge>
+                        <p className="text-xs text-blue-700 mt-4 pt-3 border-t border-blue-200">
+                          <span className="font-semibold">Kolom Kode:</span> <Badge variant="outline" className="ml-1 bg-blue-100 border-blue-300 text-blue-800">{currentSheet.metadata.enrichmentStats.kodeEfekColumn}</Badge>
                           {currentSheet.metadata.enrichmentStats.nilaiPasarColumn && (
-                            <> • Kolom Nilai: <Badge variant="outline">{currentSheet.metadata.enrichmentStats.nilaiPasarColumn}</Badge></>
+                            <> • <span className="font-semibold ml-2">Kolom Nilai:</span> <Badge variant="outline" className="ml-1 bg-blue-100 border-blue-300 text-blue-800">{currentSheet.metadata.enrichmentStats.nilaiPasarColumn}</Badge></>
                           )}
                         </p>
                       )}
-                    </AlertDescription>
-                  </Alert>
+                    </CardContent>
+                  </Card>
                 )}
 
                 {/* Sheet Tabs */}
                 {etlResult.sheets.length > 0 && (
-                  <Card>
-                    <CardHeader className="pb-3">
+                  <Card className="border-primary/10 bg-gradient-to-br from-background via-background to-primary/5">
+                    <CardHeader className="pb-3 border-b border-primary/10">
                       <div className="flex items-center justify-between flex-wrap gap-4">
-                        <CardTitle>Preview Data Bersih</CardTitle>
-                        <Button 
-                          onClick={handleSaveToDatabase}
-                          disabled={isSaving}
-                          className="gap-2"
-                        >
-                          {isSaving ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Save className="w-4 h-4" />
-                          )}
-                          Simpan ke Database
-                        </Button>
+                        <div className="flex items-center gap-3">
+                          <div className="bg-primary/10 p-2 rounded-lg">
+                            <FileSpreadsheet className="w-5 h-5 text-primary" />
+                          </div>
+                          <div>
+                            <CardTitle>Preview Data Bersih</CardTitle>
+                            <CardDescription className="mt-1">
+                              Pratinjau data setelah proses cleaning dan enrichment
+                            </CardDescription>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button 
+                            onClick={() => setShowFormulaEditor(true)}
+                            variant="outline"
+                            className="gap-2"
+                          >
+                            <Zap className="w-4 h-4" />
+                            Formula Editor
+                          </Button>
+                          <Button 
+                            onClick={handleSaveToDatabase}
+                            disabled={isSaving}
+                            className="gap-2 bg-emerald-600 hover:bg-emerald-700"
+                          >
+                            {isSaving ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Save className="w-4 h-4" />
+                            )}
+                            Simpan ke Database
+                          </Button>
+                        </div>
                       </div>
                     </CardHeader>
-                    <CardContent className="space-y-4">
+                    <CardContent className="space-y-4 pt-4">
                       {/* Sheet Selector */}
                       {etlResult.sheets.length > 1 && (
-                        <div className="flex flex-wrap gap-2">
+                        <div className="flex flex-wrap gap-2 pb-4 border-b border-border/50">
                           {etlResult.sheets.map((sheet, idx) => (
                             <Button
                               key={idx}
                               variant={selectedSheetIndex === idx ? 'default' : 'outline'}
                               size="sm"
                               onClick={() => setSelectedSheetIndex(idx)}
+                              className="gap-2"
                             >
                               {sheet.sheetName}
                               <Badge 
                                 variant={selectedSheetIndex === idx ? 'secondary' : 'outline'}
-                                className="ml-2"
                               >
                                 {sheet.data.length}
                               </Badge>
@@ -298,24 +398,45 @@ export function ETLDashboard() {
 
           {/* Database Monitor Tab */}
           <TabsContent value="monitor">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Database className="w-5 h-5" />
-                  Database Monitor
-                </CardTitle>
-                <CardDescription>
-                  Lihat dan kelola data yang tersimpan di database lokal (IndexedDB).
-                  Data bersifat append (ditambahkan), tidak menimpa data lama.
-                </CardDescription>
+            <Card className="border-primary/20 bg-gradient-to-br from-background via-background to-primary/5">
+              <CardHeader className="pb-3 border-b border-primary/10">
+                <div className="flex items-center gap-3">
+                  <div className="bg-primary/10 p-2 rounded-lg">
+                    <Database className="w-5 h-5 text-primary" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-lg">Database Monitor</CardTitle>
+                    <CardDescription className="mt-1">
+                      Lihat dan kelola data yang tersimpan di database lokal (IndexedDB).
+                      Data bersifat append (ditambahkan), tidak menimpa data lama.
+                    </CardDescription>
+                  </div>
+                </div>
               </CardHeader>
-              <CardContent>
+              <CardContent className="pt-6">
                 <DatabaseMonitor />
               </CardContent>
             </Card>
           </TabsContent>
         </Tabs>
       </main>
+
+      {/* Formula Editor Modal */}
+      {showFormulaEditor && etlResult?.sheets[selectedSheetIndex] && (
+        <FormulaEditor
+          columns={etlResult.sheets[selectedSheetIndex].headers}
+          allSheetColumns={etlResult.sheets
+            .map((sheet, idx) => 
+              idx !== selectedSheetIndex 
+                ? { sheetName: sheet.tableName, headers: sheet.headers }
+                : null
+            )
+            .filter(Boolean) as Array<{ sheetName: string; headers: string[] }>
+          }
+          onSave={handleFormulaApply}
+          onCancel={() => setShowFormulaEditor(false)}
+        />
+      )}
 
       {/* Footer */}
       <footer className="border-t mt-8">

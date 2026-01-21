@@ -39,9 +39,9 @@ export interface ETLResult {
 }
 
 export interface DatabaseRecord extends Record<string, unknown> {
-  _id?: number;
-  _fileName: string;
-  _uploadDate: string;
+  id?: number;
+  fileName: string;
+  uploadDate: string;
 }
 
 export interface StoredTable {

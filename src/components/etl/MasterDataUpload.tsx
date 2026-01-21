@@ -98,25 +98,29 @@ export function MasterDataUpload({ onMasterDataLoaded }: MasterDataUploadProps) 
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
+    <Card className="border-primary/20 bg-gradient-to-br from-background via-background to-primary/5">
+      <CardHeader className="pb-3 border-b border-primary/10">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Database className="w-5 h-5 text-primary" />
-            <CardTitle className="text-lg">Master Data Emiten</CardTitle>
+          <div className="flex items-center gap-3">
+            <div className="bg-primary/10 p-2 rounded-lg">
+              <Database className="w-5 h-5 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-lg">Master Data Emiten</CardTitle>
+              <CardDescription className="mt-1">
+                Data referensi untuk pencocokan Kode Efek
+              </CardDescription>
+            </div>
           </div>
           {isLoaded && (
-            <Badge variant="outline" className="gap-1">
+            <Badge variant="outline" className="gap-1 border-emerald-200 bg-emerald-50 text-emerald-700">
               <CheckCircle className="w-3 h-3" />
               {loadSource === 'default' ? 'Default' : 'Custom'}
             </Badge>
           )}
         </div>
-        <CardDescription>
-          Data referensi untuk pencocokan Kode Efek ke Grup Afiliasi
-        </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 pt-4">
         {isLoading ? (
           <div className="flex items-center justify-center py-4">
             <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
@@ -124,23 +128,24 @@ export function MasterDataUpload({ onMasterDataLoaded }: MasterDataUploadProps) 
           </div>
         ) : isLoaded && stats ? (
           <>
-            <Alert>
-              <CheckCircle className="w-4 h-4" />
-              <AlertTitle>Master Data Aktif</AlertTitle>
-              <AlertDescription className="mt-2">
+            <Alert className="border-emerald-200 bg-emerald-50">
+              <CheckCircle className="w-4 h-4 text-emerald-600" />
+              <AlertTitle className="text-emerald-900">Master Data Aktif</AlertTitle>
+              <AlertDescription className="mt-3 text-emerald-800">
                 <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <span className="text-muted-foreground">Total Emiten:</span>
-                    <span className="ml-2 font-medium">{stats.totalEmiten.toLocaleString()}</span>
+                  <div className="bg-white rounded p-3 border border-emerald-100">
+                    <span className="text-muted-foreground block text-xs font-medium mb-1">Total Emiten</span>
+                    <span className="text-lg font-bold text-emerald-700">{stats.totalEmiten.toLocaleString()}</span>
                   </div>
-                  <div>
-                    <span className="text-muted-foreground">Grup Unik:</span>
-                    <span className="ml-2 font-medium">{stats.uniqueGroups}</span>
+                  <div className="bg-white rounded p-3 border border-emerald-100">
+                    <span className="text-muted-foreground block text-xs font-medium mb-1">Grup Unik</span>
+                    <span className="text-lg font-bold text-emerald-700">{stats.uniqueGroups}</span>
                   </div>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-1">
-                  {Object.entries(stats.categories).slice(0, 5).map(([cat, count]) => (
-                    <Badge key={cat} variant="secondary" className="text-xs">
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="text-xs font-semibold text-emerald-900 block w-full">Kategori:</span>
+                  {Object.entries(stats.categories).slice(0, 8).map(([cat, count]) => (
+                    <Badge key={cat} variant="secondary" className="text-xs bg-emerald-100 text-emerald-800 border-emerald-200">
                       {cat}: {count}
                     </Badge>
                   ))}
@@ -163,17 +168,17 @@ export function MasterDataUpload({ onMasterDataLoaded }: MasterDataUploadProps) 
                   </span>
                 </Button>
               </label>
-              <Button variant="ghost" size="icon" onClick={handleReset}>
+              <Button variant="ghost" size="icon" onClick={handleReset} title="Reset ke default">
                 <RefreshCw className="w-4 h-4" />
               </Button>
             </div>
           </>
         ) : (
           <>
-            <Alert variant="destructive">
-              <AlertCircle className="w-4 h-4" />
-              <AlertTitle>Master Data Tidak Tersedia</AlertTitle>
-              <AlertDescription>
+            <Alert variant="destructive" className="border-red-200 bg-red-50">
+              <AlertCircle className="w-4 h-4 text-red-600" />
+              <AlertTitle className="text-red-900">Master Data Tidak Tersedia</AlertTitle>
+              <AlertDescription className="text-red-800">
                 Upload file master data emiten untuk mengaktifkan fitur grouping dan agregasi.
               </AlertDescription>
             </Alert>
