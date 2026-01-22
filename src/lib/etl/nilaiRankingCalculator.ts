@@ -378,7 +378,28 @@ export function updateVD59WithCalculatedData(
   
   console.log(`📉 TOTAL POTONGAN RISIKO: ${totalPotonganRisiko.toLocaleString()}`);
   
-  const valMKBDAdjusted = valBaseModalKerja - totalPotonganRisiko;
+  // --- 4A. EXTRACT UTANG SUB-ORDINASI FROM VD59 ---
+  let utangsubordinasi = 0;
+  
+  for (const row of vd59Data) {
+    const rowStr = Object.values(row).map(v => String(v || '').toUpperCase()).join(' ');
+    if (rowStr.includes('UTANG SUB-ORDINASI') || rowStr.includes('UTANG SUBORDINASI')) {
+      utangsubordinasi = parseNumberRobust(row[colJumlah] || row[colTotal] || 0);
+      console.log(`✅ Found UTANG SUB-ORDINASI: ${utangsubordinasi.toLocaleString('id-ID')}`);
+      break;
+    }
+  }
+  
+  if (utangsubordinasi === 0) {
+    console.warn('⚠️ Row dengan "UTANG SUB-ORDINASI" tidak ditemukan di VD59');
+  }
+  
+  // --- 4B. CALCULATE TOTAL MODAL KERJA BERSIH (TMKBERSIH) ---
+  const tmkbersih = valBaseModalKerja + utangsubordinasi;
+  console.log(`🧮 TOTAL MODAL KERJA BERSIH (TMKBERSIH): ${tmkbersih.toLocaleString()}`);
+  console.log(`   = Base Modal Kerja (${valBaseModalKerja.toLocaleString()}) + Utang Sub-Ordinasi (${utangsubordinasi.toLocaleString()})`);
+  
+  const valMKBDAdjusted = tmkbersih - totalPotonganRisiko;
   console.log(`🏁 HASIL MKBD DISESUAIKAN: ${valMKBDAdjusted.toLocaleString()}`);
 
 
