@@ -40,8 +40,6 @@ export interface ETLResult {
 
 export interface DatabaseRecord extends Record<string, unknown> {
   id?: number;
-  fileName: string;
-  uploadDate: string;
 }
 
 export interface StoredTable {

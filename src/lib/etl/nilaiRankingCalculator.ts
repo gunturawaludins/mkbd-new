@@ -85,19 +85,56 @@ export function extractVD59TotalFromData(
 }
 
 /**
+ * EXTRACT TOTAL EKUITAS FROM VD52
+ */
+export function extractVD52TotalEkuitasFromData(
+  data: Record<string, unknown>[],
+  headers: string[]
+): number {
+  console.log('=== EXTRACTING VD52 TOTAL EKUITAS (ROBUST MODE) ===');
+  
+  let targetRow: Record<string, unknown> | undefined;
+
+  for (const row of data) {
+    const rowStr = Object.values(row).map(v => String(v || '').toUpperCase()).join(' ');
+    if (rowStr.includes('TOTAL EKUITAS')) {
+      targetRow = row;
+      console.log('✅ Found row containing "TOTAL EKUITAS"');
+      break;
+    }
+  }
+
+  if (!targetRow) {
+    console.warn('⚠️ Row dengan "TOTAL EKUITAS" tidak ditemukan di VD52');
+    return 0;
+  }
+
+  let maxVal = 0;
+  Object.values(targetRow).forEach(val => {
+    const num = parseNumberRobust(val);
+    if (num > maxVal) maxVal = num;
+  });
+
+  console.log(`💰 Extracted Max Value (Total Ekuitas): ${maxVal.toLocaleString('id-ID')}`);
+  console.log('=== VD52 EXTRACTION COMPLETE ===\n');
+
+  return maxVal;
+}
+
+/**
  * CALCULATE VD510 RANKING LIABILITIES
  * Logic Updated:
  * 1. Check Persentase: If < 20% (0.2), Result = 0
- * 2. Else: Result = Grup Nilai Pasar Wajar - (20% * Total Aset Lancar)
+ * 2. Else: Result = Grup Nilai Pasar Wajar - (20% * Total Ekuitas)
  */
 export function calculateVD510NilaiRanking(
   data: Record<string, unknown>[],
   headers: string[],
-  totalAsetLancar: number
+  totalEkuitas: number
 ): Record<string, unknown>[] {
   console.log('=== CALCULATING VD510 NILAI RANGKING LIABILITIES ===');
-  const pengurang = totalAsetLancar * 0.2;
-  console.log(`📉 Pengurang (20% Aset): ${pengurang.toLocaleString('id-ID')}`);
+  const pengurang = totalEkuitas * 0.2;
+  console.log(`📉 Pengurang (20% Ekuitas): ${pengurang.toLocaleString('id-ID')}`);
 
   // 1. IDENTIFY COLUMNS
   

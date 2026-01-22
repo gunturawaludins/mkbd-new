@@ -7,6 +7,7 @@ import { processEnrichmentPipeline } from './enrichment';
 import { isMasterLoaded } from './masterData';
 import {
   extractVD59TotalFromData,
+  extractVD52TotalEkuitasFromData,
   calculateVD510NilaiRanking,
   resetCalculationState,
   updateVD59WithCalculatedData
@@ -14,6 +15,7 @@ import {
 
 const VD510_SHEET_PATTERN = /vd510|vd5[\-_]?10|formulir\s*10/i;
 const VD59_SHEET_PATTERN = /vd59|vd5[\-_]?9|formulir\s*9/i;
+const VD52_SHEET_PATTERN = /vd52|vd5[\-_]?2|formulir\s*2/i;
 
 const TABLE_10C_START = 'TABEL 10C';
 const TABLE_10C_STOP_MARKERS = ['TABEL 10D', 'TABEL 10E', 'Apabila diperlukan'];
@@ -33,12 +35,12 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
     const workbook = XLSX.read(arrayBuffer, { type: 'array' });
 
     const allSheets: ProcessedSheet[] = [];
-    let totalAsetLancar: number = 0;
-    let vd59Found = false;
+    let totalEkuitas: number = 0;
+    let vd52Found = false;
 
     console.log('🚀 Starting Extraction Process...');
 
-    // --- PASS 1: EXTRACT DATA & FIND ASET LANCAR ---
+    // --- PASS 1: EXTRACT DATA & FIND TOTAL EKUITAS ---
     for (const sheetName of workbook.SheetNames) {
       try {
         const worksheet = workbook.Sheets[sheetName];
@@ -54,13 +56,13 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
 
         let processedSheet = processSheetData(sheetData, file.name);
 
-        // Cek VD59 untuk ambil Aset Lancar
-        if (VD59_SHEET_PATTERN.test(sheetName)) {
-          console.log(`📊 Detected VD59: "${sheetName}".`);
-          const extractedVal = extractVD59TotalFromData(processedSheet.data, processedSheet.headers);
+        // Cek VD52 untuk ambil Total Ekuitas
+        if (VD52_SHEET_PATTERN.test(sheetName)) {
+          console.log(`📊 Detected VD52: "${sheetName}".`);
+          const extractedVal = extractVD52TotalEkuitasFromData(processedSheet.data, processedSheet.headers);
           if (extractedVal > 0) {
-            totalAsetLancar = extractedVal;
-            vd59Found = true;
+            totalEkuitas = extractedVal;
+            vd52Found = true;
           }
         }
 
@@ -71,7 +73,7 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
     }
 
     // --- PASS 2: CALCULATE VD510 ---
-    console.log(`📊 Pass 2: Calc VD510 with Aset = ${totalAsetLancar}`);
+    console.log(`📊 Pass 2: Calc VD510 with Total Ekuitas = ${totalEkuitas}`);
     
     let grandTotalRankingLiabilities = 0; 
 
@@ -83,7 +85,7 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
         const calculatedData = calculateVD510NilaiRanking(
           sheet.data,
           sheet.headers,
-          totalAsetLancar 
+          totalEkuitas 
         );
 
         // Ambil Total Portofolio
@@ -212,8 +214,7 @@ function processSheetData(sheetData: SheetData, fileName: string): ProcessedShee
     if (nilaiRankingColumn) { processedData = processedData.map(row => ({ ...row, [nilaiRankingColumn]: null })); }
   }
   const uploadDate = new Date().toISOString();
-  const dataWithMetadata = processedData.map((row) => ({ ...row, fileName: fileName, uploadDate: uploadDate }));
-  return { sheetName: sheetData.sheetName, tableName: sanitizeTableName(sheetData.sheetName), headers: [...finalHeaders, 'fileName', 'uploadDate'], data: dataWithMetadata, metadata: { fileName, uploadDate, originalRowCount: sheetData.rowCount, cleanedRowCount: cleanedData.length, enrichmentStats } };
+  return { sheetName: sheetData.sheetName, tableName: sanitizeTableName(sheetData.sheetName), headers: finalHeaders, data: processedData, metadata: { fileName, uploadDate, originalRowCount: sheetData.rowCount, cleanedRowCount: cleanedData.length, enrichmentStats } };
 }
 
 export function getSheetNames(file: File): Promise<string[]> {
