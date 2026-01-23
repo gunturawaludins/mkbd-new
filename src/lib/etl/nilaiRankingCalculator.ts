@@ -157,13 +157,59 @@ export function calculateVD510NilaiRanking(
 
   console.log(`🔍 Column Persentase found: ${persentaseKey || 'NONE'}`);
 
-  // 2. PROCESS ROWS
-  let nilaiRankingSum = 0;
-  let portfolioRowIndex = -1;
-  
+  // DEFINE PORTFOLIO MARKERS
   const portfolioTotalMarkers = [
     'portfolio tidak terkonsentrasi', 'total portfolio', 'total portofolio milik', 'total portofolio'
   ];
+
+  // 1A. PRE-PROCESS: IDENTIFIKASI DUPLIKAT GRUP VALUE & HIGHEST PERSENTASE
+  const grupPersentaseMap = new Map<number, { maxPersentase: number; selectedIdx: number }>();
+  
+  data.forEach((row, idx) => {
+    const rowStr = Object.values(row).map(v => String(v || '').toLowerCase()).join(' ');
+    
+    // Skip portfolio & subtotal
+    if (portfolioTotalMarkers.some(m => rowStr.includes(m)) || rowStr.includes('sub total')) {
+      return;
+    }
+
+    // Ambil Grup Value
+    let grupValue = 0;
+    if (GRUP_VAL_KEY in row) {
+      grupValue = parseNumberRobust(row[GRUP_VAL_KEY]);
+    } else {
+      const fallbackKey = Object.keys(row).find(k => k.includes('GRUP') && k.includes('NILAI'));
+      if (fallbackKey) grupValue = parseNumberRobust(row[fallbackKey]);
+    }
+
+    if (grupValue === 0) return;
+
+    // Ambil Persentase
+    let persentase = 0;
+    if (persentaseKey && row[persentaseKey] !== undefined) {
+      persentase = parseNumberRobust(row[persentaseKey]);
+    }
+
+    // Update map: simpan persentase tertinggi untuk setiap grup
+    if (!grupPersentaseMap.has(grupValue)) {
+      grupPersentaseMap.set(grupValue, { maxPersentase: persentase, selectedIdx: idx });
+    } else {
+      const existing = grupPersentaseMap.get(grupValue)!;
+      if (persentase > existing.maxPersentase) {
+        existing.maxPersentase = persentase;
+        existing.selectedIdx = idx;
+      }
+    }
+  });
+
+  console.log(`🔍 Duplikat Grup Value terdeteksi: ${grupPersentaseMap.size} grup unik`);
+  for (const [grupVal, info] of grupPersentaseMap) {
+    console.log(`   Grup ${grupVal.toLocaleString('id-ID')}: Max Persentase ${(info.maxPersentase * 100).toFixed(2)}% di index ${info.selectedIdx}`);
+  }
+
+  // 2. PROCESS ROWS
+  let nilaiRankingSum = 0;
+  let portfolioRowIndex = -1;
 
   const processedData = data.map((row, idx) => {
     const newRow = { ...row };
@@ -191,25 +237,26 @@ export function calculateVD510NilaiRanking(
       // 2. Ambil Persentase
       let persentase = 0;
       if (persentaseKey && row[persentaseKey] !== undefined) {
-         // Persentase di excel seringnya "0.15" atau "15%"
-         // Kita parse robust. Jika nilainya > 1 (misal 15), asumsi itu persen, jadi bagi 100.
          let rawP = parseNumberRobust(row[persentaseKey]);
-         
-         // Heuristic: Kalau angka > 1, mungkin formatnya 15 (artinya 15%). Kalau < 1, format 0.15
-         // Tapi hati-hati, bisa saja persentase > 100%. 
-         // Amannya, kita lihat konteks MKBD. Biasanya thresholdnya 0.2.
-         // Jika user input "20", kita harus anggap 0.2? Atau user input "0.2"?
-         // Standar Excel untuk persen biasanya desimal (0.2).
-         
          persentase = rawP;
       }
 
       // --- KEPUTUSAN ---
       let calculatedValue = 0;
 
-      // ATURAN 1: Jika Persentase < 20% (0.2), maka Risiko dianggap 0.
-      // Kita pakai toleransi dikit (0.1999) untuk floating point safety
-      if (persentase < 0.2) {
+      // CEK DUPLIKAT GRUP: Apakah row ini yang dipilih (highest persentase)?
+      const isSelectedForGrup = grupPersentaseMap.has(grupValue) && 
+                                grupPersentaseMap.get(grupValue)!.selectedIdx === idx;
+
+      // ATURAN 1: Jika bukan yang terpilih untuk grup yg sama, set 0
+      if (grupValue > 0 && grupPersentaseMap.has(grupValue) && !isSelectedForGrup) {
+          calculatedValue = 0;
+          if (grupValue > 0) {
+              console.log(`ℹ️ SKIP (DUPLIKAT GRUP): Entitas ini tidak terpilih untuk Grup ${grupValue.toLocaleString('id-ID')} (Persentase: ${(persentase * 100).toFixed(2)}%)`);
+          }
+      }
+      // ATURAN 2: Jika Persentase < 20% (0.2), maka Risiko dianggap 0
+      else if (persentase < 0.2) {
           calculatedValue = 0;
           
           // Debugging log jika ada saham yg kena skip
@@ -218,7 +265,7 @@ export function calculateVD510NilaiRanking(
           }
 
       } else {
-          // ATURAN 2: Jika >= 20%, Hitung Rumus
+          // ATURAN 3: Jika >= 20% dan terpilih, Hitung Rumus
           if (grupValue > 0) {
             calculatedValue = grupValue - pengurang;
             if (calculatedValue < 0) calculatedValue = 0;
