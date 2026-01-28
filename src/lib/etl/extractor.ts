@@ -10,11 +10,13 @@ import {
   extractVD52TotalEkuitasFromData,
   calculateVD510NilaiRanking,
   resetCalculationState,
-  updateVD59WithCalculatedData
+  updateVD59WithCalculatedData,
+  updateVD58WithCalculatedData
 } from './nilaiRankingCalculator';
 
 const VD510_SHEET_PATTERN = /vd510|vd5[\-_]?10|formulir\s*10/i;
 const VD59_SHEET_PATTERN = /vd59|vd5[\-_]?9|formulir\s*9/i;
+const VD58_SHEET_PATTERN = /vd58|vd5[\-_]?8|formulir\s*8/i; // <--- Tambahkan ini
 const VD52_SHEET_PATTERN = /vd52|vd5[\-_]?2|formulir\s*2/i;
 
 const TABLE_10C_START = 'TABEL 10C';
@@ -106,17 +108,19 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
       }
     }
 
-    // --- PASS 3: FORCE UPDATE VD59 (INI YANG PENTING) ---
-    // HAPUS syarat "if > 0". Kita jalankan update PAKSA.
-    console.log("🔄 Pass 3: FORCING VD59 UPDATE...");
+// --- PASS 3: FORCE UPDATE VD59 & VD58 ---
+    console.log("🔄 Pass 3: FORCING VD59 & VD58 UPDATE...");
     
     let vd59UpdatedCount = 0;
+    
+    // Kita gunakan variabel grandTotalRankingLiabilities yang sudah dihitung di Pass 2
+    
     for (let i = 0; i < allSheets.length; i++) {
         const sheet = allSheets[i];
         
-        // Cek jika ini sheet VD59
+        // 1. UPDATE VD59 (LOGIKA LAMA - TETAP UTUH)
         if (VD59_SHEET_PATTERN.test(sheet.tableName)) {
-            console.log(`⚡ UPDATING SHEET: ${sheet.sheetName}`);
+            console.log(`⚡ UPDATING SHEET VD59: ${sheet.sheetName}`);
             
             const updatedVD59 = updateVD59WithCalculatedData(
                 sheet.data,
@@ -128,12 +132,28 @@ export async function extractFromExcel(file: File): Promise<ETLResult> {
             vd59UpdatedCount++;
             result.warnings.push(`✅ VD59 "${sheet.sheetName}" berhasil di-update paksa.`);
         }
+        
+        // 2. UPDATE VD58 (LOGIKA BARU - DITAMBAHKAN)
+        else if (VD58_SHEET_PATTERN.test(sheet.tableName)) {
+            console.log(`⚡ UPDATING SHEET VD58: ${sheet.sheetName}`);
+
+            const updatedVD58 = updateVD58WithCalculatedData(
+                sheet.data,
+                sheet.headers,
+                grandTotalRankingLiabilities
+            );
+
+            allSheets[i] = { ...sheet, data: updatedVD58 };
+            result.warnings.push(`✅ VD58 "${sheet.sheetName}" berhasil di-update (Inject Nilai Ranking Liabilities).`);
+        }
     }
 
+    // Validasi tetap fokus ke VD59 karena itu mandatory
     if (vd59UpdatedCount === 0) {
         console.error("❌ ERROR: Tidak ada sheet VD59 yang ditemukan untuk di-update!");
         result.warnings.push("⚠️ Gagal Update: Sheet VD59 tidak ditemukan di Pass 3.");
     }
+
 
     result.sheets = allSheets;
 
@@ -194,6 +214,8 @@ function extractVD510Special(worksheet: XLSX.WorkSheet, sheetName: string): Shee
   });
   return { sheetName: `${sheetName}_TABEL_10C`, headers: sanitizedHeaders, originalHeaders: headerRow.map(h => String(h ?? '')), rows, rowCount: rows.length };
 }
+
+
 
 function processSheetData(sheetData: SheetData, fileName: string): ProcessedSheet {
   const { cleanedData, removedColumns } = cleanData(sheetData.rows, sheetData.headers);

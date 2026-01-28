@@ -308,6 +308,145 @@ export function resetCalculationState(): void {
  * KECUALI cell yang berisi teks label ("Total Modal Kerja...").
  * Ini menjamin angka 1.442 T hilang dimanapun dia bersembunyi.
  */
+/**
+ * UPDATE VD58 COMPLETE LOGIC (Revision 6 - Final)
+ * Fitur:
+ * 1. Update Ranking Liabilities.
+ * 2. Hitung Total Gabungan (Baris 8+9).
+ * 3. Hitung Baris 16 (Total Gabungan - Utang Sub-Ordinasi).
+ * 4. Hitung 6,25% dari Baris 16.
+ * 5. Hitung MKBD Required Risk (Max Logic: Baris 18 vs 19).
+ * 6. Hitung 0,1% Dana Kelolaan MI & MKBD Required Total (Baris 22 + 24).
+ * 7. NEW: Hitung Total MKBD Diwajibkan PE (Poin 5 + Poin 6).
+ */
+export function updateVD58WithCalculatedData(
+  vd58Data: Record<string, unknown>[],
+  headers: string[],
+  totalRankingLiabilities: number
+): Record<string, unknown>[] {
+  console.log('=== 🔨 UPDATING VD58 (Final Logic: Sum of Required MKBD) 🔨 ===');
+
+  // 1. Identifikasi Kolom "NILAI"
+  let targetCol = headers.find(h => h.trim().toUpperCase() === 'NILAI');
+  if (!targetCol) targetCol = headers.find(h => h.toUpperCase().includes('NILAI'));
+  if (!targetCol) targetCol = headers.find(h => h.trim().toUpperCase() === 'JUMLAH') || 
+                  headers.find(h => h.toUpperCase().includes('JUMLAH'));
+
+  if (!targetCol) {
+    console.error("❌ ERROR VD58: Kolom target tidak ditemukan.");
+    return vd58Data;
+  }
+
+  // --- PHASE 1: SCANNING DATA LAMA ---
+  let valTotalLiabMurni = 0;        // Baris 8
+  let valUtangSubordinasi = 0;      // Baris "DIKURANGI UTANG SUB-ORDINASI"
+  let valMinMKBD_OneStar = 0;       // Baris 18 (Persyaratan Minimal *)
+  let valDanaKelolaanMI = 0;        // Baris 23 (Dana MI)
+  let valMinMKBD_DoubleStar = 0;    // Baris 22 (Persyaratan Minimal **)
+
+  for (const row of vd58Data) {
+      const rowStr = Object.values(row).map(v => String(v || '').toUpperCase()).join(' ');
+      const val = parseNumberRobust(row[targetCol]);
+
+      // 1. Total Liabilitas Murni
+      if (rowStr.includes('TOTAL LIABILITAS') && !rowStr.includes('DAN RANKING')) {
+          valTotalLiabMurni = val;
+      }
+      
+      // 2. Utang Sub-Ordinasi
+      else if (rowStr.includes('DIKURANGI') && (rowStr.includes('SUB-ORDINASI') || rowStr.includes('SUBORDINASI'))) {
+          valUtangSubordinasi = val;
+      }
+
+      // 3. Persyaratan Minimal * (Baris 18)
+      else if (rowStr.includes('PERSYARATAN MINIMAL') && rowStr.includes('MKBD') && !rowStr.includes('**')) {
+          valMinMKBD_OneStar = val;
+      }
+      // 4. Dana Kelolaan MI (Baris 23)
+      else if (rowStr.includes('DANA') && rowStr.includes('DIKELOLA') && rowStr.includes('MI')) {
+          valDanaKelolaanMI = val;
+      }
+      // 5. Persyaratan Minimal ** (Baris 22)
+      else if (rowStr.includes('PERSYARATAN MINIMAL') && rowStr.includes('**')) {
+          valMinMKBD_DoubleStar = val;
+      }
+  }
+
+  // --- PHASE 2: KALKULASI NILAI BARU ---
+  
+  // A. Chain Ranking Liabilities
+  const newTotalGabungan = valTotalLiabMurni + totalRankingLiabilities;
+  const newBaris16 = newTotalGabungan - valUtangSubordinasi; // Explicit Deduction
+  
+  // B. Chain MKBD Risk (Max Logic)
+  const result625 = newBaris16 * 0.0625;
+  const valMKBDRequired_Risk = Math.max(valMinMKBD_OneStar, result625);
+
+  // C. Chain MKBD MI (Sum Logic)
+  const result01Percent = valDanaKelolaanMI * 0.001; 
+  const valMKBDRequired_Total = valMinMKBD_DoubleStar + result01Percent;
+
+  // D. NEW: Chain Final MKBD PE (Sum of Risk + Total)
+  // Rumus: Hasil Max (Baris 20) + Hasil Sum (Baris 25)
+  const valTotalMKBDRequiredPE = valMKBDRequired_Risk + valMKBDRequired_Total;
+
+  console.log(`📊 VD58 Final Calculation:`);
+  console.log(`   1. MKBD Risk (Max Logic): ${valMKBDRequired_Risk.toLocaleString()}`);
+  console.log(`   2. MKBD Total (MI Logic): ${valMKBDRequired_Total.toLocaleString()}`);
+  console.log(`   🏁 MKBD DIWAJIBKAN PE (1+2): ${valTotalMKBDRequiredPE.toLocaleString()}`);
+
+
+  // --- PHASE 3: UPDATE ROWS ---
+  return vd58Data.map(row => {
+    const rowStr = Object.values(row).map(v => String(v || '').toUpperCase()).join(' ');
+    const newRow = { ...row };
+
+    // 1. Update Ranking Liabilities
+    if (rowStr.includes('RANKING LIABILITIES') && rowStr.includes('TOTAL') && !rowStr.includes('DAN')) {
+        newRow[targetCol!] = totalRankingLiabilities;
+    }
+
+    // 2. Update Total Gabungan
+    else if (rowStr.includes('TOTAL LIABILITAS DAN RANKING') && !rowStr.includes('TANPA UTANG')) {
+        newRow[targetCol!] = newTotalGabungan;
+    }
+
+    // 3. Update Baris 16
+    else if (rowStr.includes('TOTAL LIABILITAS DAN RANKING') && rowStr.includes('TANPA UTANG SUBORDINASI')) {
+        newRow[targetCol!] = newBaris16;
+    }
+
+    // 4. Update Baris 6,25%
+    else if ((rowStr.includes('6,25%') || rowStr.includes('6.25%')) && rowStr.includes('BARIS 16')) {
+        newRow[targetCol!] = result625;
+    }
+    
+    // 5. Update MKBD Dipersyaratkan (Max Logic)
+    else if (rowStr.includes('DIPERSYARATKAN') && rowStr.includes('LEBIH TINGGI') && !rowStr.includes('DITAMBAH')) {
+        newRow[targetCol!] = valMKBDRequired_Risk;
+    }
+
+    // 6. Update Baris 0,1%
+    else if ((rowStr.includes('0,1%') || rowStr.includes('0.1%')) && rowStr.includes('BARIS 23')) {
+        newRow[targetCol!] = result01Percent;
+    }
+
+    // 7. Update MKBD Dipersyaratkan Final (Ditambah)
+    else if (rowStr.includes('DIPERSYARATKAN') && rowStr.includes('DITAMBAH')) {
+        newRow[targetCol!] = valMKBDRequired_Total;
+    }
+
+    // 8. NEW: Update MKBD Diwajibkan PE (Total Akhir)
+    // Ciri: Ada kata "DIWAJIBKAN" dan "PE" dan "IZIN"
+    else if (rowStr.includes('DIWAJIBKAN') && rowStr.includes('PE') && rowStr.includes('IZIN')) {
+        newRow[targetCol!] = valTotalMKBDRequiredPE;
+        console.log(`✅ Update MKBD Diwajibkan PE -> ${valTotalMKBDRequiredPE.toLocaleString()}`);
+    }
+
+    return newRow;
+  });
+}
+
 export function updateVD59WithCalculatedData(
   vd59Data: Record<string, unknown>[],
   headers: string[],
@@ -469,7 +608,6 @@ export function updateVD59WithCalculatedData(
     }
     
     // B. BARIS 20 (BRUTAL OVERWRITE)
-    // "Harusnya dia juga 773..." -> OKE, KITA PAKSA SEMUA ANGKA DI SINI JADI 773.
     if (idx === idxBaris20) {
         // 1. Isi kolom resmi
         if (colTotal) newRow[colTotal] = valBaseModalKerja;
@@ -485,12 +623,6 @@ export function updateVD59WithCalculatedData(
             if (strVal.includes('TOTAL MODAL') || strVal.includes('BARIS 18')) {
                 return; // Skip, ini label
             }
-
-            // SELAIN LABEL, CEK APAKAH INI KOLOM ANGKA/DINAMIS
-            // Ciri:
-            // - Nama kolom mengandung "YO_"
-            // - ATAU isinya adalah angka (parseNumberRobust > 0)
-            // - ATAU isinya mirip angka hantu "1.442..."
             
             const num = parseNumberRobust(val);
             const cleanStr = strVal.replace(/[^0-9]/g, '');
@@ -540,6 +672,8 @@ export function updateVD59WithCalculatedData(
       if (colTotal) updatedData[idxExcessMKBD][colTotal] = valExcess;
       if (colJumlah) updatedData[idxExcessMKBD][colJumlah] = valExcess;
   }
+
+  
 
   return updatedData;
 }
